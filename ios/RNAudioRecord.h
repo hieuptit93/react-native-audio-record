@@ -16,6 +16,9 @@ typedef struct {
 } AQRecordState;
 
 @interface RNAudioRecord : RCTEventEmitter <RCTBridgeModule>
-    @property (nonatomic, assign) AQRecordState recordState;
-    @property (nonatomic, strong) NSString* filePath;
+@property (nonatomic, readonly, copy) NSString *filePath;
+@property (nonatomic, readonly, strong) AVAudioEngine *audioEngine;
+@property (nonatomic, readonly, strong) AVAudioFile *audioFile;
+@property (nonatomic, readonly, strong) AVAudioMixerNode *mixerNode;
+@property (nonatomic, readonly, assign) BOOL isRecording;
 @end
