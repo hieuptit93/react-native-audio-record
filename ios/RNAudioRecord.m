@@ -1,106 +1,266 @@
 #import "RNAudioRecord.h"
+#import <AVFoundation/AVFoundation.h>
 
-@implementation RNAudioRecord
+@interface RNAudioRecord () <AVAudioRecorderDelegate>
+@property (nonatomic, readwrite, copy) NSString *filePath;
+@property (nonatomic, strong) AVAudioRecorder *audioRecorder;
+@property (nonatomic, strong) NSTimer *meteringTimer;
+@property (nonatomic, assign) BOOL isRecording;
+@end
+
+@implementation RNAudioRecord {
+    BOOL hasListeners;
+}
 
 RCT_EXPORT_MODULE();
 
-RCT_EXPORT_METHOD(init:(NSDictionary *) options) {
-    RCTLogInfo(@"init");
-    _recordState.mDataFormat.mSampleRate        = options[@"sampleRate"] == nil ? 44100 : [options[@"sampleRate"] doubleValue];
-    _recordState.mDataFormat.mBitsPerChannel    = options[@"bitsPerSample"] == nil ? 16 : [options[@"bitsPerSample"] unsignedIntValue];
-    _recordState.mDataFormat.mChannelsPerFrame  = options[@"channels"] == nil ? 1 : [options[@"channels"] unsignedIntValue];
-    _recordState.mDataFormat.mBytesPerPacket    = (_recordState.mDataFormat.mBitsPerChannel / 8) * _recordState.mDataFormat.mChannelsPerFrame;
-    _recordState.mDataFormat.mBytesPerFrame     = _recordState.mDataFormat.mBytesPerPacket;
-    _recordState.mDataFormat.mFramesPerPacket   = 1;
-    _recordState.mDataFormat.mReserved          = 0;
-    _recordState.mDataFormat.mFormatID          = kAudioFormatLinearPCM;
-    _recordState.mDataFormat.mFormatFlags       = _recordState.mDataFormat.mBitsPerChannel == 8 ? kLinearPCMFormatFlagIsPacked : (kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked);
+- (dispatch_queue_t)methodQueue {
+    return dispatch_get_main_queue();
+}
 
+- (BOOL)setupAudioSession {
+    NSError *error = nil;
+    AVAudioSession *session = [AVAudioSession sharedInstance];
     
-    _recordState.bufferByteSize = 2048;
-    _recordState.mSelf = self;
+    // Request permission first
+    if ([session respondsToSelector:@selector(requestRecordPermission:)]) {
+        __block BOOL permissionGranted = NO;
+        dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        
+        [session requestRecordPermission:^(BOOL granted) {
+            permissionGranted = granted;
+            dispatch_semaphore_signal(sem);
+        }];
+        
+        dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        
+        if (!permissionGranted) {
+            RCTLogInfo(@"[RNAudioRecord] Record permission denied");
+            return NO;
+        }
+        RCTLogInfo(@"[RNAudioRecord] Record permission granted");
+    }
     
+    // Configure session
+    if (![session setCategory:AVAudioSessionCategoryRecord
+                       mode:AVAudioSessionModeMeasurement
+                    options:0
+                      error:&error]) {
+        RCTLogInfo(@"[RNAudioRecord] Failed to set category: %@", error);
+        return NO;
+    }
+    RCTLogInfo(@"[RNAudioRecord] Successfully set category to Record");
+    
+    // Activate session
+    if (![session setActive:YES error:&error]) {
+        RCTLogInfo(@"[RNAudioRecord] Failed to activate session: %@", error);
+        return NO;
+    }
+    RCTLogInfo(@"[RNAudioRecord] Successfully activated audio session");
+    
+    // Log session state
+    RCTLogInfo(@"[RNAudioRecord] Session state:");
+    RCTLogInfo(@"[RNAudioRecord] - Input available: %d", session.isInputAvailable);
+    RCTLogInfo(@"[RNAudioRecord] - Sample rate: %f", session.sampleRate);
+    RCTLogInfo(@"[RNAudioRecord] - Category: %@", session.category);
+    RCTLogInfo(@"[RNAudioRecord] - Mode: %@", session.mode);
+    
+    return YES;
+}
+
+RCT_EXPORT_METHOD(init:(NSDictionary *)options) {
+    RCTLogInfo(@"[RNAudioRecord] Initializing with options: %@", options);
+    
+    // Setup file path
     NSString *fileName = options[@"wavFile"] == nil ? @"audio.wav" : options[@"wavFile"];
     NSString *docDir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-    _filePath = [NSString stringWithFormat:@"%@/%@", docDir, fileName];
-}
-
-RCT_EXPORT_METHOD(start) {
-    RCTLogInfo(@"start");
-
-    // most audio players set session category to "Playback", record won't work in this mode
-    // therefore set session category to "Record" before recording
-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryRecord error:nil];
-
-    _recordState.mIsRunning = true;
-    _recordState.mCurrentPacket = 0;
+    self.filePath = [NSString stringWithFormat:@"%@/%@", docDir, fileName];
     
-    CFURLRef url = CFURLCreateWithString(kCFAllocatorDefault, (CFStringRef)_filePath, NULL);
-    AudioFileCreateWithURL(url, kAudioFileWAVEType, &_recordState.mDataFormat, kAudioFileFlags_EraseFile, &_recordState.mAudioFile);
-    CFRelease(url);
-    
-    AudioQueueNewInput(&_recordState.mDataFormat, HandleInputBuffer, &_recordState, NULL, NULL, 0, &_recordState.mQueue);
-    for (int i = 0; i < kNumberBuffers; i++) {
-        AudioQueueAllocateBuffer(_recordState.mQueue, _recordState.bufferByteSize, &_recordState.mBuffers[i]);
-        AudioQueueEnqueueBuffer(_recordState.mQueue, _recordState.mBuffers[i], 0, NULL);
+    // Remove existing file
+    if ([[NSFileManager defaultManager] fileExistsAtPath:self.filePath]) {
+        [[NSFileManager defaultManager] removeItemAtPath:self.filePath error:nil];
     }
-    AudioQueueStart(_recordState.mQueue, NULL);
-}
-
-RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
-                  rejecter:(__unused RCTPromiseRejectBlock)reject) {
-    RCTLogInfo(@"stop");
-    if (_recordState.mIsRunning) {
-        _recordState.mIsRunning = false;
-        AudioQueueStop(_recordState.mQueue, true);
-        AudioQueueDispose(_recordState.mQueue, true);
-        AudioFileClose(_recordState.mAudioFile);
-    }
-    resolve(_filePath);
-    unsigned long long fileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:_filePath error:nil] fileSize];
-    RCTLogInfo(@"file path %@", _filePath);
-    RCTLogInfo(@"file size %llu", fileSize);
-}
-
-void HandleInputBuffer(void *inUserData,
-                       AudioQueueRef inAQ,
-                       AudioQueueBufferRef inBuffer,
-                       const AudioTimeStamp *inStartTime,
-                       UInt32 inNumPackets,
-                       const AudioStreamPacketDescription *inPacketDesc) {
-    AQRecordState* pRecordState = (AQRecordState *)inUserData;
     
-    if (!pRecordState->mIsRunning) {
+    // Setup audio session
+    if (![self setupAudioSession]) {
         return;
     }
     
-    if (AudioFileWritePackets(pRecordState->mAudioFile,
-                              false,
-                              inBuffer->mAudioDataByteSize,
-                              inPacketDesc,
-                              pRecordState->mCurrentPacket,
-                              &inNumPackets,
-                              inBuffer->mAudioData
-                              ) == noErr) {
-        pRecordState->mCurrentPacket += inNumPackets;
+    // Get actual session sample rate
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    double actualSampleRate = session.sampleRate;
+    
+    // Setup audio settings
+    NSDictionary *settings = @{
+        AVFormatIDKey: @(kAudioFormatLinearPCM),
+        AVSampleRateKey: @(actualSampleRate),
+        AVNumberOfChannelsKey: @1,
+        AVLinearPCMBitDepthKey: @16,
+        AVLinearPCMIsFloatKey: @(NO),
+        AVLinearPCMIsBigEndianKey: @(NO),
+        AVLinearPCMIsNonInterleaved: @(NO)
+    };
+    
+    RCTLogInfo(@"[RNAudioRecord] Audio settings: %@", settings);
+    
+    // Initialize recorder
+    NSError *error = nil;
+    NSURL *url = [NSURL fileURLWithPath:self.filePath];
+    
+    self.audioRecorder = [[AVAudioRecorder alloc] initWithURL:url
+                                                    settings:settings
+                                                       error:&error];
+    
+    if (error || !self.audioRecorder) {
+        RCTLogInfo(@"[RNAudioRecord] Failed to initialize recorder: %@", error);
+        return;
     }
     
-    short *samples = (short *) inBuffer->mAudioData;
-    long nsamples = inBuffer->mAudioDataByteSize;
-    NSData *data = [NSData dataWithBytes:samples length:nsamples];
-    NSString *str = [data base64EncodedStringWithOptions:0];
-    [pRecordState->mSelf sendEventWithName:@"data" body:str];
+    self.audioRecorder.delegate = self;
+    self.audioRecorder.meteringEnabled = YES;
     
-    AudioQueueEnqueueBuffer(pRecordState->mQueue, inBuffer, 0, NULL);
+    BOOL prepared = [self.audioRecorder prepareToRecord];
+    RCTLogInfo(@"[RNAudioRecord] Prepare to record result: %d", prepared);
+    
+    if (!prepared) {
+        RCTLogInfo(@"[RNAudioRecord] Failed to prepare recorder");
+        return;
+    }
+    
+    RCTLogInfo(@"[RNAudioRecord] Setup complete");
+}
+
+RCT_EXPORT_METHOD(start) {
+    if (!self.audioRecorder) {
+        RCTLogInfo(@"[RNAudioRecord] Recorder not initialized");
+        return;
+    }
+    
+    // Ensure proper session configuration before starting
+    AVAudioSession *session = [AVAudioSession sharedInstance];
+    NSError *error = nil;
+    
+    // Log pre-start state
+    RCTLogInfo(@"[RNAudioRecord] Pre-start session state:");
+    RCTLogInfo(@"[RNAudioRecord] - Category: %@", session.category);
+    RCTLogInfo(@"[RNAudioRecord] - Mode: %@", session.mode);
+    RCTLogInfo(@"[RNAudioRecord] - Is other audio playing: %d", session.isOtherAudioPlaying);
+    
+    // Reset session if needed
+    if (![session.category isEqualToString:AVAudioSessionCategoryRecord]) {
+        RCTLogInfo(@"[RNAudioRecord] Resetting session category to Record");
+        
+        if (![session setCategory:AVAudioSessionCategoryRecord
+                           mode:AVAudioSessionModeMeasurement
+                        options:0
+                          error:&error]) {
+            RCTLogInfo(@"[RNAudioRecord] Failed to reset category: %@", error);
+            return;
+        }
+        
+        if (![session setActive:YES error:&error]) {
+            RCTLogInfo(@"[RNAudioRecord] Failed to reactivate session: %@", error);
+            return;
+        }
+    }
+    
+    // Verify final session state
+    RCTLogInfo(@"[RNAudioRecord] Final session state before recording:");
+    RCTLogInfo(@"[RNAudioRecord] - Category: %@", session.category);
+    RCTLogInfo(@"[RNAudioRecord] - Mode: %@", session.mode);
+    RCTLogInfo(@"[RNAudioRecord] - Is other audio playing: %d", session.isOtherAudioPlaying);
+    
+    // Start recording
+    BOOL started = [self.audioRecorder record];
+    RCTLogInfo(@"[RNAudioRecord] Record start result: %d", started);
+    
+    if (!started) {
+        RCTLogInfo(@"[RNAudioRecord] Failed to start recording");
+        return;
+    }
+    
+    self.isRecording = YES;
+    
+    // Start metering timer
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.meteringTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                            target:self
+                                                          selector:@selector(updateMeters)
+                                                          userInfo:nil
+                                                           repeats:YES];
+    });
+    
+    RCTLogInfo(@"[RNAudioRecord] Recording started successfully");
+}
+
+- (void)updateMeters {
+    if (!self.isRecording || !hasListeners || !self.audioRecorder) return;
+    
+    [self.audioRecorder updateMeters];
+    
+    float averagePower = [self.audioRecorder averagePowerForChannel:0];
+    float peakPower = [self.audioRecorder peakPowerForChannel:0];
+    
+    // Convert audio levels to linear scale (0-1)
+    float normalizedAverage = powf(10.0f, 0.05f * averagePower);
+    float normalizedPeak = powf(10.0f, 0.05f * peakPower);
+    
+    // Create small data packet
+    NSMutableData *data = [NSMutableData dataWithLength:4];
+    float values[2] = {normalizedAverage, normalizedPeak};
+    [data appendBytes:values length:sizeof(values)];
+    
+    // Send metering data
+    [self sendEventWithName:@"data" 
+                      body:[data base64EncodedStringWithOptions:0]];
+}
+
+RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.meteringTimer invalidate];
+        self.meteringTimer = nil;
+    });
+    
+    if (self.audioRecorder && self.audioRecorder.recording) {
+        [self.audioRecorder stop];
+    }
+    
+    self.isRecording = NO;
+    
+    // Deactivate session
+    NSError *error = nil;
+    [[AVAudioSession sharedInstance] setActive:NO 
+                                 withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation 
+                                     error:&error];
+    
+    if ([[NSFileManager defaultManager] fileExistsAtPath:self.filePath]) {
+        resolve(self.filePath);
+    } else {
+        reject(@"no_file", @"Recording file not found", nil);
+    }
+}
+
+- (void)audioRecorderDidFinishRecording:(AVAudioRecorder *)recorder 
+                          successfully:(BOOL)flag {
+    RCTLogInfo(@"[RNAudioRecord] Recording finished - Success: %d", flag);
+}
+
+- (void)audioRecorderEncodeErrorDidOccur:(AVAudioRecorder *)recorder 
+                                  error:(NSError *)error {
+    RCTLogInfo(@"[RNAudioRecord] Encoding error: %@", error);
+}
+
+- (void)startObserving {
+    hasListeners = YES;
+}
+
+- (void)stopObserving {
+    hasListeners = NO;
 }
 
 - (NSArray<NSString *> *)supportedEvents {
     return @[@"data"];
-}
-
-- (void)dealloc {
-    RCTLogInfo(@"dealloc");
-    AudioQueueDispose(_recordState.mQueue, true);
 }
 
 @end
