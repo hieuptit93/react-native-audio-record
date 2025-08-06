@@ -10,16 +10,25 @@ import java.util.Collections;
 import java.util.List;
 
 public class RNAudioRecordPackage implements ReactPackage {
+    private RNAudioRecordModule audioRecordModule;
 
     @Override
     public List<NativeModule> createNativeModules(ReactApplicationContext reactContext) {
-      List<NativeModule> modules = new ArrayList<>();
-      modules.add(new RNAudioRecordModule(reactContext));
-      return modules;
+        List<NativeModule> modules = new ArrayList<>();
+        audioRecordModule = new RNAudioRecordModule(reactContext);
+        modules.add(audioRecordModule);
+        return modules;
     }
 
     @Override
     public List<ViewManager> createViewManagers(ReactApplicationContext reactContext) {
-      return Collections.emptyList();
+        return Collections.emptyList();
+    }
+
+    public void onDestroy() {
+        if (audioRecordModule != null) {
+            audioRecordModule.cleanup();
+            audioRecordModule = null;
+        }
     }
 }
