@@ -41,15 +41,16 @@ RCT_EXPORT_MODULE();
         RCTLogInfo(@"[RNAudioRecord] Record permission granted");
     }
     
-    // Configure session
-    if (![session setCategory:AVAudioSessionCategoryRecord
-                       mode:AVAudioSessionModeMeasurement
-                    options:0
+    // Configure session with enhanced audio quality
+    if (![session setCategory:AVAudioSessionCategoryPlayAndRecord
+                       mode:AVAudioSessionModeDefault
+                    options:AVAudioSessionCategoryOptionDefaultToSpeaker |
+                            AVAudioSessionCategoryOptionAllowBluetooth |
+                            AVAudioSessionCategoryOptionMixWithOthers
                       error:&error]) {
         RCTLogInfo(@"[RNAudioRecord] Failed to set category: %@", error);
         return NO;
     }
-    RCTLogInfo(@"[RNAudioRecord] Successfully set category to Record");
     
     // Activate session
     if (![session setActive:YES error:&error]) {
@@ -146,13 +147,15 @@ RCT_EXPORT_METHOD(start) {
     RCTLogInfo(@"[RNAudioRecord] - Mode: %@", session.mode);
     RCTLogInfo(@"[RNAudioRecord] - Is other audio playing: %d", session.isOtherAudioPlaying);
     
-    // Reset session if needed
-    if (![session.category isEqualToString:AVAudioSessionCategoryRecord]) {
-        RCTLogInfo(@"[RNAudioRecord] Resetting session category to Record");
+    // Reset session if needed with enhanced settings
+    if (![session.category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        RCTLogInfo(@"[RNAudioRecord] Resetting session category to PlayAndRecord");
         
-        if (![session setCategory:AVAudioSessionCategoryRecord
-                           mode:AVAudioSessionModeMeasurement
-                        options:0
+        if (![session setCategory:AVAudioSessionCategoryPlayAndRecord
+                           mode:AVAudioSessionModeDefault
+                        options:AVAudioSessionCategoryOptionDefaultToSpeaker |
+                                AVAudioSessionCategoryOptionAllowBluetooth |
+                                AVAudioSessionCategoryOptionMixWithOthers
                           error:&error]) {
             RCTLogInfo(@"[RNAudioRecord] Failed to reset category: %@", error);
             return;
